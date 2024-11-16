@@ -26,37 +26,51 @@ namespace Radarr.Api.V3.Calendar
         }
 
         [HttpGet("Radarr.ics")]
-        public IActionResult GetCalendarFeed(int pastDays = 7, int futureDays = 28, string tags = "", bool unmonitored = false)
+        public IActionResult GetCalendarFeed(
+            int pastDays = 7,
+            int futureDays = 28,
+            string tags = "",
+            bool unmonitored = false,
+            string[] releaseTypes = null)
         {
             var start = DateTime.Today.AddDays(-pastDays);
             var end = DateTime.Today.AddDays(futureDays);
-            var parsedTags = new List<int>();
 
-            if (tags.IsNotNullOrWhiteSpace())
-            {
-                parsedTags.AddRange(tags.Split(',').Select(_tagService.GetTag).Select(t => t.Id));
-            }
+            var parsedTags = tags?
+                .Split(',', StringSplitOptions.RemoveEmptyEntries)
+                .Select(tag => _tagService.GetTag(tag)?.Id)
+                .Where(tagId => tagId.HasValue)
+                .Select(tagId => tagId.Value)
+                .ToList() ?? new List<int>();
 
             var movies = _movieService.GetMoviesBetweenDates(start, end, unmonitored);
+
             var calendar = new Ical.Net.Calendar
             {
                 ProductId = "-//radarr.video//Radarr//EN"
             };
 
-            var calendarName = "Radarr Movies Calendar";
+            const string calendarName = "Radarr Movies Calendar";
             calendar.AddProperty(new CalendarProperty("NAME", calendarName));
             calendar.AddProperty(new CalendarProperty("X-WR-CALNAME", calendarName));
 
+            var validReleaseTypes = new HashSet<string> { "cinematic", "digital", "physical" };
+
+            var requestedReleaseTypes = releaseTypes?
+                .Where(validReleaseTypes.Contains)
+                .ToList() ?? validReleaseTypes.ToList();
+
             foreach (var movie in movies.OrderBy(v => v.Added))
             {
-                if (parsedTags.Any() && parsedTags.None(movie.Tags.Contains))
+                if (parsedTags.Any() && !parsedTags.Intersect(movie.Tags).Any())
                 {
                     continue;
                 }
 
-                CreateEvent(calendar, movie.MovieMetadata, "cinematic");
-                CreateEvent(calendar, movie.MovieMetadata, "digital");
-                CreateEvent(calendar, movie.MovieMetadata, "physical");
+                foreach (var releaseType in requestedReleaseTypes)
+                {
+                    CreateEvent(calendar, movie.MovieMetadata, releaseType);
+                }
             }
 
             var serializer = (IStringSerializer)new SerializerFactory().Build(calendar.GetType(), new SerializationContext());
@@ -65,7 +79,7 @@ namespace Radarr.Api.V3.Calendar
             return Content(icalendar, "text/calendar");
         }
 
-        private void CreateEvent(Ical.Net.Calendar calendar, MovieMetadata movie, string releaseType)
+        private static void CreateEvent(Ical.Net.Calendar calendar, MovieMetadata movie, string releaseType)
         {
             var date = movie.InCinemas;
             var eventType = "_cinemas";
